@@ -899,6 +899,7 @@ impl FloatingLayout {
                 start_data,
                 mapped.clone(),
                 edges,
+                self.space.outputs().next().cloned().unwrap(),
                 location,
                 size,
                 seat,
@@ -990,7 +991,9 @@ impl FloatingLayout {
             geo.as_local()
                 .to_global(self.space.outputs().next().unwrap()),
         );
-        mapped.configure();
+        if mapped.latest_size_committed() {
+            mapped.configure();
+        }
 
         true
     }

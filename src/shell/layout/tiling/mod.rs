@@ -130,7 +130,6 @@ impl TreeQueue {
 pub struct TilingLayout {
     output: Output,
     queue: TreeQueue,
-    pending_blockers: Vec<TilingBlocker>,
     placeholder_id: Id,
     swapping_stack_surface_id: Id,
     last_overview_hover: Option<(Option<Instant>, TargetZone)>,
@@ -353,7 +352,6 @@ impl TilingLayout {
                 animation_start: None,
             },
             output: output.clone(),
-            pending_blockers: Vec::new(),
             placeholder_id: Id::new(),
             swapping_stack_surface_id: Id::new(),
             last_overview_hover: None,
@@ -1667,11 +1665,11 @@ impl TilingLayout {
                         .unwrap();
 
                     let stack_data = tree.get_mut(&next_child_id).unwrap().data_mut();
-                    let mut mapped = match stack_data {
+                    let mapped = match stack_data {
                         Data::Mapped { mapped, .. } => mapped.clone(),
                         _ => unreachable!(),
                     };
-                    let stack = mapped.stack_ref_mut().unwrap();
+                    let stack = mapped.stack_ref().unwrap();
 
                     let surface = match node.data() {
                         Data::Mapped { mapped, .. } => mapped.active_window(),
@@ -2345,8 +2343,20 @@ impl TilingLayout {
 
     pub fn update_animation_state(&mut self) -> HashMap<ClientId, Client> {
         let mut clients = HashMap::new();
-        for blocker in self.pending_blockers.drain(..) {
-            clients.extend(blocker.signal_ready());
+        let mut ready_trees = 0;
+        for (_, _, blocker) in self.queue.trees.iter().skip(1) {
+            if let Some(blocker) = blocker.as_ref() {
+                if blocker.is_processed() {
+                    ready_trees += 1;
+                }
+                if blocker.is_ready() {
+                    clients.extend(blocker.clients());
+                    continue;
+                }
+                break;
+            } else {
+                ready_trees += 1;
+            }
         }
 
         if let Some(start) = self.queue.animation_start {
@@ -2361,6 +2371,7 @@ impl TilingLayout {
             {
                 let _ = self.queue.animation_start.take();
                 let _ = self.queue.trees.pop_front();
+                ready_trees -= 1;
                 let front = self.queue.trees.front_mut().unwrap();
                 if let Some(root_id) = front.0.root_node_id() {
                     for node in front
@@ -2383,28 +2394,12 @@ impl TilingLayout {
             }
         }
 
-        let ready_trees = self
-            .queue
-            .trees
-            .iter()
-            .skip(1)
-            .take_while(|(_, _, blocker)| {
-                blocker
-                    .as_ref()
-                    .map(|blocker| blocker.is_ready() && blocker.is_signaled())
-                    .unwrap_or(true)
-            })
-            .count();
-
         // merge
         let other_duration = if ready_trees > 1 {
             self.queue
                 .trees
                 .drain(1..ready_trees)
-                .fold(None, |res, (_, duration, blocker)| {
-                    if let Some(blocker) = blocker {
-                        clients.extend(blocker.signal_ready());
-                    }
+                .fold(None, |res, (_, duration, _)| {
                     Some(
                         res.map(|old_duration: Duration| old_duration.max(duration))
                             .unwrap_or(duration),
@@ -2416,13 +2411,10 @@ impl TilingLayout {
 
         // start
         if ready_trees > 0 {
-            let (_, duration, blocker) = self.queue.trees.get_mut(1).unwrap();
+            let (_, duration, _) = self.queue.trees.get_mut(1).unwrap();
             *duration = other_duration
                 .map(|other| other.max(*duration))
                 .unwrap_or(*duration);
-            if let Some(blocker) = blocker {
-                clients.extend(blocker.signal_ready());
-            }
             self.queue.animation_start = Some(Instant::now());
         }
 
@@ -2589,8 +2581,18 @@ impl TilingLayout {
                 }
                 _ => unreachable!(),
             }
-            let blocker = TilingLayout::update_positions(&self.output, &mut tree, gaps);
-            self.queue.push_tree(tree, None, blocker);
+
+            let should_configure =
+                tree.traverse_pre_order(&group_id)
+                    .unwrap()
+                    .all(|node| match node.data() {
+                        Data::Mapped { mapped, .. } => mapped.latest_size_committed(),
+                        _ => true,
+                    });
+            if should_configure {
+                let blocker = TilingLayout::update_positions(&self.output, &mut tree, gaps);
+                self.queue.push_tree(tree, None, blocker);
+            }
 
             return true;
         }
@@ -2742,7 +2744,7 @@ impl TilingLayout {
                 match tree.get_mut(window_id).unwrap().data_mut() {
                     Data::Mapped { mapped, .. } => {
                         mapped.convert_to_stack((&self.output, mapped.bbox()), self.theme.clone());
-                        let Some(stack) = mapped.stack_ref_mut() else {
+                        let Some(stack) = mapped.stack_ref() else {
                             unreachable!()
                         };
                         for surface in window.windows().map(|s| s.0) {
@@ -3965,9 +3967,17 @@ impl TilingLayout {
             .then(|| &self.queue.trees.front().unwrap().0);
 
         let percentage = if let Some(animation_start) = self.queue.animation_start {
-            let percentage = Instant::now().duration_since(animation_start).as_millis() as f32
-                / duration.as_millis() as f32;
-            ease(EaseInOutCubic, 0.0, 1.0, percentage)
+            if *duration == Duration::ZERO {
+                1.0
+            } else {
+                let now = Instant::now();
+                let total = duration.as_millis() as f32;
+                let since = now.duration_since(animation_start).as_millis() as f32;
+                let percentage = since / total;
+                debug_assert!(!percentage.is_nan());
+                debug_assert!(!percentage.is_infinite());
+                ease(EaseInOutCubic, 0.0, 1.0, percentage)
+            }
         } else {
             1.0
         };

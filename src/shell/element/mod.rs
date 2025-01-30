@@ -489,6 +489,14 @@ impl CosmicMapped {
         }
     }
 
+    pub fn latest_size_committed(&self) -> bool {
+        match &self.element {
+            CosmicMappedInternal::Stack(s) => s.surfaces().any(|s| s.latest_size_committed()),
+            CosmicMappedInternal::Window(w) => w.surface().latest_size_committed(),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn configure(&self) -> Option<Serial> {
         match &self.element {
             CosmicMappedInternal::Stack(s) => {
@@ -529,13 +537,6 @@ impl CosmicMapped {
 
     pub fn stack_ref(&self) -> Option<&CosmicStack> {
         match &self.element {
-            CosmicMappedInternal::Stack(stack) => Some(stack),
-            _ => None,
-        }
-    }
-
-    pub fn stack_ref_mut(&mut self) -> Option<&mut CosmicStack> {
-        match &mut self.element {
             CosmicMappedInternal::Stack(stack) => Some(stack),
             _ => None,
         }
